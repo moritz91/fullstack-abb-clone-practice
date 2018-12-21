@@ -6,13 +6,19 @@ import * as session from "express-session";
 import * as connectRedis from "connect-redis";
 import * as RateLimit from "express-rate-limit";
 import * as RateLimitRedisStore from "rate-limit-redis";
+import { applyMiddleware } from "graphql-middleware";
+import * as express from "express";
+import { RedisPubSub } from "graphql-redis-subscriptions";
 
+import { middleware } from "./middleware";
 import { redis } from "./redis";
 import { createTypeormConn } from "./utils/createTypeormConn";
 import { confirmEmail } from "./routes/confirmEmail";
 import { genSchema } from "./utils/genSchema";
-import { redisSessionPrefix } from "./constants";
+import { redisSessionPrefix, listingCacheKey } from "./constants";
 import { createTestConn } from "./testUtils/createTestConn";
+import { userLoader } from "./loaders/UserLoader";
+import { Listing } from "./entity/Listing";
 
 const SESSION_SECRET = "ajslkjalksjdfkl";
 const RedisStore = connectRedis(session as any);
@@ -22,13 +28,21 @@ export const startServer = async () => {
     await redis.flushall();
   }
 
+  const schema = genSchema() as any;
+  applyMiddleware(schema, middleware);
+
+  const pubsub = new RedisPubSub();
+
   const server = new GraphQLServer({
-    schema: genSchema() as any,
-    context: ({ request }) => ({
+    schema,
+    context: ({ request, response }) => ({
       redis,
-      url: request.protocol + "://" + request.get("host"),
-      session: request.session,
-      req: request
+      url: request ? request.protocol + "://" + request.get("host") : "",
+      session: request ? request.session : undefined,
+      req: request,
+      res: response,
+      userLoader: userLoader(),
+      pubsub
     })
   });
 
@@ -61,6 +75,8 @@ export const startServer = async () => {
     } as any)
   );
 
+  server.express.use("/images", express.static("images"));
+
   const cors = {
     credentials: true,
     origin:
@@ -75,7 +91,18 @@ export const startServer = async () => {
     await createTestConn(true);
   } else {
     await createTypeormConn();
+    // await conn.runMigrations();
   }
+
+  // clear cache
+  await redis.del(listingCacheKey);
+
+  // fill cache
+  const listings = await Listing.find();
+  const listingStrings = listings.map(x => JSON.stringify(x)) || null;
+  await redis.lpush(listingCacheKey, ...listingStrings);
+  // console.log(await redis.lrange(listingCacheKey, 0, -1));
+
   const app = await server.start({
     cors,
     port: process.env.NODE_ENV === "test" ? 0 : 4000

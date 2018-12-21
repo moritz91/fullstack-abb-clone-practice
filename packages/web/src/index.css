@@ -1,1 +1,7 @@
 @import "~antd/dist/antd.css";
+
+*,
+*::before,
+*::after {
+  box-sizing: content-box;
+}
